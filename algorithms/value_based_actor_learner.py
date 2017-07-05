@@ -10,6 +10,7 @@ from utils.decorators import only_on_train
 from utils.hogupdatemv import copy
 from networks.q_network import QNetwork
 from networks.dueling_network import DuelingNetwork
+from utils.replay_memory import ReplayMemory
 from actor_learner import ActorLearner, ONE_LIFE_GAMES
 
 
@@ -26,6 +27,7 @@ class ValueBasedLearner(ActorLearner):
         self.target_vars = args.target_vars
         self.target_update_flags = args.target_update_flags
         self.q_target_update_steps = args.q_target_update_steps
+        self.memory_init = args.replay_init_size
 
         self.scores = list()
 
@@ -43,6 +45,14 @@ class ValueBasedLearner(ActorLearner):
             var_list = self.local_network.params + self.target_network.params
             self.saver = tf.train.Saver(var_list=var_list, max_to_keep=3,
                                         keep_checkpoint_every_n_hours=2)
+
+        self.batch_size = args.batch_update_size
+        self._double_dqn_op()
+        # Replay Memory & batch update information
+        self.replay_memory = ReplayMemory(
+            args.replay_size,
+            self.local_network.get_input_shape(),
+            self.num_actions)
 
         # Exploration epsilons
         self.initial_epsilon = 1.0
@@ -109,6 +119,8 @@ class ValueBasedLearner(ActorLearner):
 
         return new_action, q_values
 
+    def choose_random_action(self):
+        return np.random.randint(0,self.num_actions-1)
 
     def bootstrap_value(self, state, episode_over):
         if episode_over:
@@ -180,6 +192,74 @@ class ValueBasedLearner(ActorLearner):
 
         return state, total_episode_reward, steps_at_last_reward, ep_t, episode_ave_max_q, episode_over
 
+    def prefil_replay_memory(self):
+        '''
+        prefill the memory by picking actions via a random policy
+        '''
+        episode_over = False
+
+        s = self.emulator.get_initial_state()
+
+        rewards = list()
+        states = list()
+        actions = list()
+        print("Pre-filling replay memory")
+        while len(self.replay_memory) < self.memory_init :
+            if episode_over :
+                s = self.emulator.get_initial_state()
+                episode_length = len(rewards)
+                for i in range(episode_length):
+                    self.replay_memory.append(
+                        states[i],
+                        actions[i],
+                        rewards[i],
+                        i+1 == episode_length)
+                states[:] = []
+                rewards[:] = []
+                actions[:] = []
+
+            a = self.choose_random_action()
+            new_s, reward, episode_over = self.emulator.next(a)
+            rewards.append(reward)
+            actions.append(a)
+            states.append(s)
+            s = new_s
+
+    def _double_dqn_op(self):
+        q_local_action = tf.cast(tf.argmax(
+            self.local_network.output_layer, axis=1), tf.int32)
+        q_target_max = utils.ops.slice_2d(
+            self.target_network.output_layer,
+            tf.range(0, self.batch_size),
+            q_local_action,
+        )
+        self.one_step_reward = tf.placeholder(tf.float32,
+            self.batch_size, name='one_step_reward')
+        self.is_terminal = tf.placeholder(tf.bool,
+            self.batch_size, name='is_terminal')
+        self.y_target = self.one_step_reward + self.gamma*q_target_max \
+            * (1 - tf.cast(self.is_terminal, tf.float32))
+
+    def batch_update(self):
+        s_i, a_i, r_i, s_f, is_terminal = self.replay_memory.sample_batch(self.batch_size)
+        feed_dict={
+            self.local_network.input_ph: s_f,
+            self.target_network.input_ph: s_f,
+            self.is_terminal: is_terminal,
+            self.one_step_reward: r_i,
+        }
+        y_target = self.session.run(self.y_target, feed_dict=feed_dict)
+        feed_dict={
+            self.local_network.input_ph: s_i,
+            self.local_network.target_ph: y_target,
+            self.local_network.selected_action_ph: a_i
+        }
+        loss = self.session.run(self.local_network.loss,
+                                feed_dict=feed_dict)
+        grads = self.session.run(self.local_network.get_gradients,
+                                 feed_dict=feed_dict)
+        self.apply_gradients_to_shared_memory_vars(grads)
+        return(loss)
 
 class OneStepQLearner(ValueBasedLearner):
 
@@ -203,6 +283,7 @@ class OneStepQLearner(ValueBasedLearner):
         states =  list()
         actions = list()
         targets = list()
+        loss = list()
         while(self.global_step.value() < self.max_global_steps):
 
             a, readout_t = self.choose_next_action(s)
@@ -210,7 +291,7 @@ class OneStepQLearner(ValueBasedLearner):
             total_episode_reward += reward
             reward = self.rescale_reward(reward)
             ep_t += 1
-
+            '''
             if episode_over :
                 y = reward
             else:
@@ -219,11 +300,18 @@ class OneStepQLearner(ValueBasedLearner):
                     feed_dict={self.target_network.input_ph: [new_s]}
                 )
                 y = reward + self.gamma * np.max(q_target_value_new_state)
-
             actions.append(a)
             states.append(s)
             rewards.append(reward)
             targets.append(y)
+            '''
+            self.replay_memory.append(
+                s,
+                a,
+                reward,
+                episode_over,
+            )
+
 
             self.local_step += 1
             episode_ave_max_q += np.max(readout_t)
@@ -232,15 +320,17 @@ class OneStepQLearner(ValueBasedLearner):
 
             if ((self.local_step % self.grads_update_steps == 0)
                 or episode_over):
-                self.apply_update(states, actions, targets)
+                loss.append(self.batch_update())
+                #self.apply_update(states, actions, targets)
                 # Sync local learning net with shared mem
                 self.sync_net_with_shared_memory(self.local_network, self.learning_vars)
                 self.save_vars()
+                '''
                 rewards = []
                 states = []
                 actions = []
                 targets = []
-
+                '''
             if update_target:
                     update_target = False
                     self.update_target()
