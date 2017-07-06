@@ -10,7 +10,7 @@ from utils.decorators import only_on_train
 from utils.hogupdatemv import copy
 from networks.q_network import QNetwork
 from networks.dueling_network import DuelingNetwork
-from utils.replay_memory import ReplayMemory
+from utils.prioritized_experience_replay import PrioritizedExperienceReplay
 from actor_learner import ActorLearner, ONE_LIFE_GAMES
 
 
@@ -49,10 +49,13 @@ class ValueBasedLearner(ActorLearner):
         self.batch_size = args.batch_update_size
         self._double_dqn_op()
         # Replay Memory & batch update information
-        self.replay_memory = ReplayMemory(
-            args.replay_size,
-            self.local_network.get_input_shape(),
-            self.num_actions)
+        self.replay_memory = PrioritizedExperienceReplay(
+            maxlen=args.replay_size,
+            input_shape=self.local_network.get_input_shape(),
+            action_size=self.num_actions,
+            eps=0.01,
+            alpha=0.6,
+        )
 
         # Exploration epsilons
         self.initial_epsilon = 1.0
@@ -213,7 +216,8 @@ class ValueBasedLearner(ActorLearner):
                         states[i],
                         actions[i],
                         rewards[i],
-                        i+1 == episode_length)
+                        i+1 == episode_length,
+                        rewards[i]) # we say that the reward is the TD-Error for a random action
                 states[:] = []
                 rewards[:] = []
                 actions[:] = []
@@ -241,7 +245,10 @@ class ValueBasedLearner(ActorLearner):
             * (1 - tf.cast(self.is_terminal, tf.float32))
 
     def batch_update(self):
-        s_i, a_i, r_i, s_f, is_terminal = self.replay_memory.sample_batch(self.batch_size)
+        s_i, a_i, r_i, s_f, is_terminal, t_i, P_i, P_min = self.replay_memory.sample_batch(self.batch_size)
+
+        #w_max = ((1 / args.replay_size ) * (1/P_max)) ** self.beta
+
         feed_dict={
             self.local_network.input_ph: s_f,
             self.target_network.input_ph: s_f,
@@ -249,17 +256,24 @@ class ValueBasedLearner(ActorLearner):
             self.one_step_reward: r_i,
         }
         y_target = self.session.run(self.y_target, feed_dict=feed_dict)
+
         feed_dict={
             self.local_network.input_ph: s_i,
             self.local_network.target_ph: y_target,
             self.local_network.selected_action_ph: a_i
         }
-        loss = self.session.run(self.local_network.loss,
+        #TODO apply importance weighting to the calculates loss prior to applying the gradients
+        error = self.session.run(self.local_network.diff,
                                 feed_dict=feed_dict)
+        #update the priorities in the memory
+        for i in range(self.batch_size):
+            idx = t_i[i]
+            self.replay_memory.update(idx,np.abs(error[i]))
+
         grads = self.session.run(self.local_network.get_gradients,
                                  feed_dict=feed_dict)
         self.apply_gradients_to_shared_memory_vars(grads)
-        return(loss)
+        #return(loss)
 
 class OneStepQLearner(ValueBasedLearner):
 
@@ -291,25 +305,25 @@ class OneStepQLearner(ValueBasedLearner):
             total_episode_reward += reward
             reward = self.rescale_reward(reward)
             ep_t += 1
-            '''
-            if episode_over :
-                y = reward
-            else:
-                q_target_value_new_state = self.session.run(
+
+            # compute the loss for this current step
+            q_target_values_new_state = self.session.run(
                     self.target_network.output_layer,
-                    feed_dict={self.target_network.input_ph: [new_s]}
-                )
-                y = reward + self.gamma * np.max(q_target_value_new_state)
-            actions.append(a)
-            states.append(s)
-            rewards.append(reward)
-            targets.append(y)
-            '''
+                    feed_dict={self.target_network.input_ph: [new_s]})
+            y = reward + self.gamma * np.max(q_target_values_new_state)
+            error = self.session.run(self.local_network.diff,
+                                    feed_dict={
+                                        self.local_network.input_ph: [s],
+                                        self.local_network.target_ph: [y],
+                                        self.local_network.selected_action_ph: [a]
+                                        }
+                                    )
             self.replay_memory.append(
                 s,
                 a,
                 reward,
                 episode_over,
+                np.abs(error),
             )
 
 
@@ -320,17 +334,12 @@ class OneStepQLearner(ValueBasedLearner):
 
             if ((self.local_step % self.grads_update_steps == 0)
                 or episode_over):
-                loss.append(self.batch_update())
+                self.batch_update()
                 #self.apply_update(states, actions, targets)
                 # Sync local learning net with shared mem
                 self.sync_net_with_shared_memory(self.local_network, self.learning_vars)
                 self.save_vars()
-                '''
-                rewards = []
-                states = []
-                actions = []
-                targets = []
-                '''
+
             if update_target:
                     update_target = False
                     self.update_target()
