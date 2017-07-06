@@ -210,8 +210,8 @@ def get_config():
     parser.add_argument('--b2', default=0.999, type=float, help='Beta2 for the Adam optimizer', dest='b2')
     parser.add_argument('--e', default=0.1, type=float, help='Epsilon for the Rmsprop and Adam optimizers', dest='e')
     parser.add_argument('--momentum', default=0.99, type=float, help='Discount factor for the history/coming gradient, for the Rmsprop optimizer', dest='momentum')
-    parser.add_argument('-lr', '--initial_lr', default=0.0025, type=float, help='Initial value for the learning rate. Default = LogUniform(10**-4, 10**-2)', dest='initial_lr')
-    parser.add_argument('-lra', '--lr_annealing_steps', default=20000000, type=int, help='Nr. of global steps during which the learning rate will be linearly annealed towards zero', dest='lr_annealing_steps')
+    parser.add_argument('-lr', '--initial_lr', default=0.00025, type=float, help='Initial value for the learning rate. Default = LogUniform(10**-4, 10**-2)', dest='initial_lr')
+    parser.add_argument('-lra', '--lr_annealing_steps', default=200000000, type=int, help='Nr. of global steps during which the learning rate will be linearly annealed towards zero', dest='lr_annealing_steps')
     parser.add_argument('--max_episode_steps', default=None, type=int, help='max rollout steps per trpo episode', dest='max_episode_steps')
 
     #clipping args

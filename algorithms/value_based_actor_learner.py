@@ -182,10 +182,10 @@ class ValueBasedLearner(ActorLearner):
                 2*np.array(self.scores).std(),
                 max(self.scores),
             ))
-            self.log_summary(
-                total_episode_reward,
-                episode_ave_max_q,
-                self.epsilon)
+            #self.log_summary(
+            #    total_episode_reward,
+            #    episode_ave_max_q,
+            #    self.epsilon)
 
             state = self.emulator.get_initial_state()
             total_episode_reward = 0
@@ -331,7 +331,7 @@ class OneStepQLearner(ValueBasedLearner):
             episode_ave_max_q += np.max(readout_t)
             global_step, update_target = self.global_step.increment(
                     self.q_target_update_steps)
-
+            self.local_network.global_step = global_step
             if ((self.local_step % self.grads_update_steps == 0)
                 or episode_over):
                 self.batch_update()
@@ -348,6 +348,13 @@ class OneStepQLearner(ValueBasedLearner):
             if self.target_update_flags.updated[self.actor_id] == 1:
                 self.sync_net_with_shared_memory(self.target_network, self.target_vars)
                 self.target_update_flags.updated[self.actor_id] = 0
+
+            if (self.local_step % 1000 == 0) or episode_over:
+                episode_ave_max_q = episode_ave_max_q/float(ep_t)
+                self.log_summary(
+                    total_episode_reward,
+                    episode_ave_max_q,
+                    self.epsilon)
 
             if episode_over:
                 s, total_episode_reward, steps_at_last_reward, ep_t, episode_ave_max_q, episode_over = \
